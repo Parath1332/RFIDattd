@@ -1,48 +1,41 @@
+# main.py
 import os
 import json
 from io import BytesIO
 from datetime import datetime
 from flask import Flask
-
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from telegram import Update, InputFile
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ConversationHandler,
-    ContextTypes,
-    filters
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler, ContextTypes, filters
 
-# ========== FLASK SETUP ==========
-app = Flask(__name__)
+# ================== FLASK SETUP ==================
+flask_app = Flask(__name__)
 
-@app.route("/")
+@flask_app.route("/")
 def home():
     return "RFID Telegram Bot is running!"
 
-# ========== CONFIG ==========
+# ================== CONFIG ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_SHEETS_KEY = json.loads(os.environ.get("GOOGLE_SHEETS_KEY"))
 
 ASK_DATE_RANGE = 1
 
-# ========== GOOGLE SHEETS ==========
-scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_SHEETS_KEY, scope)
+# ================== GOOGLE SHEETS SETUP ==================
+scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_info(GOOGLE_SHEETS_KEY, scopes=scope)
 client = gspread.authorize(creds)
 
 SHEET_NAME = "AttendanceDB"
 EMPLOYEE_WS = "Employees"
 ATTENDANCE_WS = "Attendance"
 
-# ========== HELPERS ==========
+# ================== HELPERS ==================
 def get_employee_by_chat_id(chat_id):
     sheet = client.open(SHEET_NAME).worksheet(EMPLOYEE_WS)
     all_emps = sheet.get_all_records()
@@ -82,7 +75,7 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
         tm = log["check_time"].strftime("%I:%M %p")
         data.append([i, dt, tm, log["log_type"]])
 
-    table = Table(data, colWidths=[40, 100, 100, 80])
+    table = Table(data, colWidths=[30, 100, 100, 70])
     style = TableStyle([
         ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#4a90e2")),
         ('TEXTCOLOR',(0,0),(-1,0),colors.white),
@@ -99,13 +92,13 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
     buffer.seek(0)
     return buffer
 
-# ========== TELEGRAM HANDLERS ==========
+# ================== TELEGRAM HANDLERS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     emp = get_employee_by_chat_id(chat_id)
     if emp:
         await update.message.reply_text(
-            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nThen reply with: 2025-10-01 to 2025-10-04"
+            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nExample: /mylog\nThen reply with: YYYY-MM-DD to YYYY-MM-DD"
         )
     else:
         await update.message.reply_text("⚠️ You are not registered. Contact admin.")
@@ -148,8 +141,8 @@ async def handle_date_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
-# ========== MAIN FUNCTION ==========
-def main():
+# ================== RUN TELEGRAM BOT ==================
+def run_telegram_bot():
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -161,11 +154,13 @@ def main():
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(conv_handler)
 
-    print("✅ Bot running...")
+    print("✅ Telegram Bot running...")
     app_bot.run_polling()
 
-# ========== RUN BOT + FLASK ==========
+# ================== MAIN ==================
 if __name__ == "__main__":
     import threading
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)).start()
-    main()
+    # Run Flask in a separate thread
+    threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))), daemon=True).start()
+    # Run Telegram bot
+    run_telegram_bot()
