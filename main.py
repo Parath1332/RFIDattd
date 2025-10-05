@@ -20,20 +20,20 @@ from telegram.ext import (
     filters
 )
 
-# ================== FLASK SETUP ==================
+# ========== FLASK SETUP ==========
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "RFID Telegram Bot is running!"
 
-# ================== CONFIG ==================
+# ========== CONFIG ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_SHEETS_KEY = json.loads(os.environ.get("GOOGLE_SHEETS_KEY"))
 
 ASK_DATE_RANGE = 1
 
-# ================== GOOGLE SHEETS SETUP ==================
+# ========== GOOGLE SHEETS ==========
 scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_SHEETS_KEY, scope)
 client = gspread.authorize(creds)
@@ -42,7 +42,7 @@ SHEET_NAME = "AttendanceDB"
 EMPLOYEE_WS = "Employees"
 ATTENDANCE_WS = "Attendance"
 
-# ================== HELPERS ==================
+# ========== HELPERS ==========
 def get_employee_by_chat_id(chat_id):
     sheet = client.open(SHEET_NAME).worksheet(EMPLOYEE_WS)
     all_emps = sheet.get_all_records()
@@ -71,13 +71,11 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
     styles = getSampleStyleSheet()
     elements = []
 
-    # Title
     elements.append(Paragraph("Attendance Report", styles['Title']))
     elements.append(Paragraph(f"{name} ({emp_id})", styles['Heading2']))
     elements.append(Paragraph(f"Period: {start_date} to {end_date}", styles['Normal']))
     elements.append(Spacer(1, 12))
 
-    # Table
     data = [["#", "Date", "Time", "Log Type"]]
     for i, log in enumerate(logs, start=1):
         dt = log["check_time"].strftime("%Y-%m-%d")
@@ -101,13 +99,13 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
     buffer.seek(0)
     return buffer
 
-# ================== TELEGRAM HANDLERS ==================
+# ========== TELEGRAM HANDLERS ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     emp = get_employee_by_chat_id(chat_id)
     if emp:
         await update.message.reply_text(
-            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nExample: /mylog\nThen reply with: 2025-10-01 to 2025-10-04"
+            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nThen reply with: 2025-10-01 to 2025-10-04"
         )
     else:
         await update.message.reply_text("⚠️ You are not registered. Contact admin.")
@@ -150,7 +148,7 @@ async def handle_date_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
-# ================== MAIN FUNCTION ==================
+# ========== MAIN FUNCTION ==========
 def main():
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -166,8 +164,8 @@ def main():
     print("✅ Bot running...")
     app_bot.run_polling()
 
-# ================== RUN BOT + FLASK ==================
+# ========== RUN BOT + FLASK ==========
 if __name__ == "__main__":
     import threading
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))).start()
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)).start()
     main()
