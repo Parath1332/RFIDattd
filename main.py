@@ -1,9 +1,8 @@
-# main.py
 import os
 import json
 from io import BytesIO
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -11,9 +10,15 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
-
-from telegram import Update, InputFile, Bot
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters, CallbackContext
+from telegram import Update, InputFile
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters
+)
 
 # ================== FLASK SETUP ==================
 app = Flask(__name__)
@@ -26,24 +31,18 @@ def home():
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_SHEETS_KEY = json.loads(os.environ.get("GOOGLE_SHEETS_KEY"))
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN env variable not set!")
-
-# Telegram bot state
 ASK_DATE_RANGE = 1
 
 # ================== GOOGLE SHEETS SETUP ==================
-scope = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
+scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_SHEETS_KEY, scope)
 client = gspread.authorize(creds)
 
-# Spreadsheet config
 SHEET_NAME = "AttendanceDB"
 EMPLOYEE_WS = "Employees"
 ATTENDANCE_WS = "Attendance"
 
-# ================== TELEGRAM HELPERS ==================
+# ================== HELPERS ==================
 def get_employee_by_chat_id(chat_id):
     sheet = client.open(SHEET_NAME).worksheet(EMPLOYEE_WS)
     all_emps = sheet.get_all_records()
@@ -76,7 +75,7 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
     elements.append(Paragraph("Attendance Report", styles['Title']))
     elements.append(Paragraph(f"{name} ({emp_id})", styles['Heading2']))
     elements.append(Paragraph(f"Period: {start_date} to {end_date}", styles['Normal']))
-    elements.append(Spacer(1, 20))
+    elements.append(Spacer(1, 12))
 
     # Table
     data = [["#", "Date", "Time", "Log Type"]]
@@ -87,13 +86,13 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
 
     table = Table(data, colWidths=[40, 100, 100, 80])
     style = TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#4a90e2")),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0,0), (-1,0), 10),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.lightgrey])
+        ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#4a90e2")),
+        ('TEXTCOLOR',(0,0),(-1,0),colors.white),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),
+        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
+        ('BOTTOMPADDING',(0,0),(-1,0),10),
+        ('GRID',(0,0),(-1,-1),0.5,colors.grey),
+        ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.lightgrey])
     ])
     table.setStyle(style)
     elements.append(table)
@@ -103,31 +102,26 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
     return buffer
 
 # ================== TELEGRAM HANDLERS ==================
-bot = Bot(BOT_TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0)
-
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     emp = get_employee_by_chat_id(chat_id)
     if emp:
-        update.message.reply_text(
+        await update.message.reply_text(
             f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nExample: /mylog\nThen reply with: 2025-10-01 to 2025-10-04"
         )
     else:
-        update.message.reply_text("⚠️ You are not registered. Contact admin.")
+        await update.message.reply_text("⚠️ You are not registered. Contact admin.")
 
-def mylog_command(update: Update, context: CallbackContext):
+async def mylog_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     emp = get_employee_by_chat_id(chat_id)
     if not emp:
-        update.message.reply_text("⚠️ You are not registered. Contact admin.")
-        return
-    update.message.reply_text("📅 Enter date range (YYYY-MM-DD to YYYY-MM-DD):")
-    # Store employee id in context
-    context.user_data['emp_id'] = emp['emp_id']
+        await update.message.reply_text("⚠️ You are not registered. Contact admin.")
+        return ConversationHandler.END
+    await update.message.reply_text("📅 Enter date range (YYYY-MM-DD to YYYY-MM-DD):")
     return ASK_DATE_RANGE
 
-def handle_date_range(update: Update, context: CallbackContext):
+async def handle_date_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
     try:
         start_str, end_str = user_input.split("to")
@@ -136,35 +130,44 @@ def handle_date_range(update: Update, context: CallbackContext):
         datetime.strptime(start_date, "%Y-%m-%d")
         datetime.strptime(end_date, "%Y-%m-%d")
 
-        emp_id = context.user_data.get('emp_id')
-        emp = get_employee_by_chat_id(update.effective_chat.id)
-        logs = fetch_logs(emp_id, start_date, end_date)
-        if not logs:
-            update.message.reply_text("📭 No attendance records found.")
-            return
+        chat_id = str(update.effective_chat.id)
+        emp = get_employee_by_chat_id(chat_id)
+        if not emp:
+            await update.message.reply_text("⚠️ Not registered.")
+            return ConversationHandler.END
 
-        pdf_buffer = generate_pdf(emp["name"], emp_id, start_date, end_date, logs)
-        update.message.reply_document(InputFile(pdf_buffer, filename=f"{emp_id}_attendance.pdf"))
+        logs = fetch_logs(emp["emp_id"], start_date, end_date)
+        if not logs:
+            await update.message.reply_text("📭 No attendance records found.")
+            return ConversationHandler.END
+
+        pdf_buffer = generate_pdf(emp["name"], emp["emp_id"], start_date, end_date, logs)
+        await update.message.reply_document(InputFile(pdf_buffer, filename=f"{emp['emp_id']}_attendance.pdf"))
 
     except Exception as e:
-        update.message.reply_text("⚠️ Invalid format. Use: YYYY-MM-DD to YYYY-MM-DD")
+        await update.message.reply_text("⚠️ Invalid format. Use: YYYY-MM-DD to YYYY-MM-DD")
         print("Date parsing error:", e)
 
-# Register handlers
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("mylog", mylog_command))
-dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_date_range))
+    return ConversationHandler.END
 
-# ================== FLASK WEBHOOK ==================
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "ok"
+# ================== MAIN FUNCTION ==================
+def main():
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# ================== RUN ==================
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("mylog", mylog_command)],
+        states={ASK_DATE_RANGE: [MessageHandler(filters.TEXT & (~filters.COMMAND), handle_date_range)]},
+        fallbacks=[]
+    )
+
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(conv_handler)
+
+    print("✅ Bot running...")
+    app_bot.run_polling()
+
+# ================== RUN BOT + FLASK ==================
 if __name__ == "__main__":
-    # Render automatically assigns PORT
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Bot running! Set webhook at /{BOT_TOKEN}")
-    app.run(host="0.0.0.0", port=port)
+    import threading
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))).start()
+    main()
