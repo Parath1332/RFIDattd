@@ -3,6 +3,7 @@ import json
 from io import BytesIO
 from datetime import datetime
 from flask import Flask
+
 import gspread
 from google.oauth2.service_account import Credentials
 from reportlab.lib.pagesizes import A4
@@ -26,7 +27,8 @@ GOOGLE_SHEETS_KEY = json.loads(os.environ.get("GOOGLE_SHEETS_KEY"))
 ASK_DATE_RANGE = 1
 
 # ================== GOOGLE SHEETS SETUP ==================
-SCOPE = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+SCOPE = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+
 creds = Credentials.from_service_account_info(GOOGLE_SHEETS_KEY, scopes=SCOPE)
 client = gspread.authorize(creds)
 
@@ -63,18 +65,20 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
     styles = getSampleStyleSheet()
     elements = []
 
+    # Title
     elements.append(Paragraph("Attendance Report", styles['Title']))
     elements.append(Paragraph(f"{name} ({emp_id})", styles['Heading2']))
     elements.append(Paragraph(f"Period: {start_date} to {end_date}", styles['Normal']))
-    elements.append(Spacer(1, 12))
+    elements.append(Spacer(1, 20))
 
+    # Table
     data = [["#", "Date", "Time", "Log Type"]]
     for i, log in enumerate(logs, start=1):
         dt = log["check_time"].strftime("%Y-%m-%d")
         tm = log["check_time"].strftime("%I:%M %p")
         data.append([i, dt, tm, log["log_type"]])
 
-    table = Table(data, colWidths=[40,100,100,80])
+    table = Table(data, colWidths=[50, 100, 100, 80])
     style = TableStyle([
         ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#4a90e2")),
         ('TEXTCOLOR',(0,0),(-1,0),colors.white),
@@ -97,7 +101,7 @@ def start(update: Update, context: CallbackContext):
     emp = get_employee_by_chat_id(chat_id)
     if emp:
         update.message.reply_text(
-            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report."
+            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nExample: /mylog\nThen reply with: 2025-10-01 to 2025-10-04"
         )
     else:
         update.message.reply_text("⚠️ You are not registered. Contact admin.")
@@ -112,8 +116,9 @@ def mylog_command(update: Update, context: CallbackContext):
     return ASK_DATE_RANGE
 
 def handle_date_range(update: Update, context: CallbackContext):
+    user_input = update.message.text.strip()
     try:
-        start_str, end_str = update.message.text.strip().split("to")
+        start_str, end_str = user_input.split("to")
         start_date = start_str.strip()
         end_date = end_str.strip()
         datetime.strptime(start_date, "%Y-%m-%d")
@@ -121,6 +126,10 @@ def handle_date_range(update: Update, context: CallbackContext):
 
         chat_id = str(update.effective_chat.id)
         emp = get_employee_by_chat_id(chat_id)
+        if not emp:
+            update.message.reply_text("⚠️ Not registered.")
+            return ConversationHandler.END
+
         logs = fetch_logs(emp["emp_id"], start_date, end_date)
         if not logs:
             update.message.reply_text("📭 No attendance records found.")
@@ -133,7 +142,7 @@ def handle_date_range(update: Update, context: CallbackContext):
         update.message.reply_text("⚠️ Invalid format. Use: YYYY-MM-DD to YYYY-MM-DD")
     return ConversationHandler.END
 
-# ================== MAIN ==================
+# ================== MAIN FUNCTION ==================
 def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
@@ -151,9 +160,10 @@ def main():
     updater.start_polling()
     updater.idle()
 
+# ================== RUN BOT + FLASK ==================
 if __name__ == "__main__":
     import threading
-    # Flask thread
+    # Run Flask in a separate thread
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))).start()
-    # Telegram bot
+    # Run Telegram bot
     main()
