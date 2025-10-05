@@ -1,5 +1,6 @@
 flask
 gspread
 oauth2client
-python-telegram-bot==13.17
+python-telegram-bot==13.15
 reportlab
+
