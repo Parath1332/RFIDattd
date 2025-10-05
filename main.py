@@ -1,173 +1,173 @@
+# main.py
 import os
 import json
-import threading
-from flask import Flask
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from io import BytesIO
 from datetime import datetime
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from flask import Flask
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
 
-# ======= Google Sheets Setup =======
-try:
-    creds_json = json.loads(os.environ["GOOGLE_SHEETS_KEY"])
-    
-    # Check if required fields are present
-    required_fields = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
-    missing_fields = [field for field in required_fields if field not in creds_json]
-    if missing_fields:
-        print(f"ERROR: Missing required fields in GOOGLE_SHEETS_KEY: {missing_fields}")
-        print(f"Available fields: {list(creds_json.keys())}")
-        raise ValueError(f"Missing required fields: {missing_fields}")
-    
-    # Validate and fix private_key
-    private_key = creds_json['private_key']
-    
-    # Check if private key is too short (should be ~1600-1700 chars for RSA 2048)
-    if len(private_key) < 200:
-        print(f"\n{'='*60}")
-        print("❌ ERROR: GOOGLE_SHEETS_KEY has an invalid/incomplete private key!")
-        print(f"{'='*60}")
-        print(f"Current private key length: {len(private_key)} characters")
-        print(f"Expected length: ~1600-1700 characters")
-        print(f"\nYour private key appears to be truncated or incomplete.")
-        print(f"\nPlease:")
-        print("1. Go back to your Google Cloud service account JSON file")
-        print("2. Make sure you copy the ENTIRE 'private_key' value")
-        print("3. It should include many lines of random-looking text between")
-        print("   -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY-----")
-        print("4. Update the GOOGLE_SHEETS_KEY secret with the complete JSON")
-        print(f"{'='*60}\n")
-        raise ValueError("Private key is too short - likely incomplete")
-    
-    # Fix newlines if needed
-    if '\\n' in private_key:
-        creds_json['private_key'] = private_key.replace('\\n', '\n')
-        print("✓ Converted literal \\n to newlines")
-    
-    print(f"✓ Credentials JSON loaded successfully")
-    print(f"✓ Service account email: {creds_json.get('client_email', 'N/A')}")
-    
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
-    print("✓ Google Sheets credentials authenticated")
-    
-except json.JSONDecodeError as e:
-    print(f"ERROR: Invalid JSON in GOOGLE_SHEETS_KEY: {e}")
-    print("Make sure you copied the entire JSON content from your service account key file")
-    raise
-except ValueError as e:
-    print(f"ERROR: Invalid credentials format: {e}")
-    raise
-client = gspread.authorize(creds)
-
-sheet_emp = client.open("AttendanceDB").worksheet("Employees")
-sheet_log = client.open("AttendanceDB").worksheet("AttendanceLog")
-
-# ======= Telegram Bot Setup =======
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-application = Application.builder().token(BOT_TOKEN).build()
-
-# ======= Flask App (Keep Replit Alive) =======
+# ================== FLASK SETUP ==================
 app = Flask(__name__)
-
 
 @app.route("/")
 def home():
-    return "Telegram Bot is Running!"
+    return "RFID Telegram Bot is running!"
 
+# ================== CONFIG ==================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GOOGLE_SHEETS_KEY = json.loads(os.environ.get("GOOGLE_SHEETS_KEY"))
 
-# ======= Bot Commands =======
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome!\n"
-                              "Use /register <EMP_ID> to register.\n"
-                              "Use /mylog to get your attendance report.")
+# Telegram bot state
+ASK_DATE_RANGE = 1
 
+# ================== GOOGLE SHEETS SETUP ==================
+scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_SHEETS_KEY, scope)
+client = gspread.authorize(creds)
 
-async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    args = context.args
-    if len(args) != 1:
-        await update.message.reply_text("Usage: /register <EMP_ID>")
-        return
+# Change these to your actual spreadsheet and worksheet names
+SHEET_NAME = "AttendanceDB"
+EMPLOYEE_WS = "Employees"
+ATTENDANCE_WS = "Attendance"
 
-    emp_id = args[0].strip()
-    records = sheet_emp.get_all_records()
-    for idx, emp in enumerate(records,
-                              start=2):  # start=2 because header row is 1
-        if emp["emp_id"] == emp_id:
-            sheet_emp.update_cell(
-                idx, 4, chat_id)  # Assuming 4th column is telegram_chat_id
-            await update.message.reply_text(f"✅ Registered {emp_id} successfully!")
-            return
+# ================== HELPERS ==================
+def get_employee_by_chat_id(chat_id):
+    sheet = client.open(SHEET_NAME).worksheet(EMPLOYEE_WS)
+    all_emps = sheet.get_all_records()
+    for emp in all_emps:
+        if str(emp.get("telegram_chat_id")) == str(chat_id):
+            return emp
+    return None
 
-    await update.message.reply_text(f"❌ Employee {emp_id} not found.")
+def fetch_logs(emp_id, start_date, end_date):
+    sheet = client.open(SHEET_NAME).worksheet(ATTENDANCE_WS)
+    all_logs = sheet.get_all_records()
+    filtered = []
+    for log in all_logs:
+        if str(log.get("emp_id")) == str(emp_id):
+            log_date = log.get("check_time").split(" ")[0]
+            if start_date <= log_date <= end_date:
+                filtered.append({
+                    "check_time": datetime.strptime(log["check_time"], "%Y-%m-%d %H:%M:%S"),
+                    "log_type": log["log_type"]
+                })
+    return filtered
 
-
-async def mylog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    records = sheet_emp.get_all_records()
-    emp_id = None
-    emp_name = None
-    for emp in records:
-        if str(emp.get("telegram_chat_id")) == chat_id:
-            emp_id = emp["emp_id"]
-            emp_name = emp["name"]
-            break
-    if not emp_id:
-        await update.message.reply_text("❌ You are not registered.")
-        return
-
-    logs = sheet_log.get_all_records()
-    user_logs = [l for l in logs if l["emp_id"] == emp_id]
-    if not user_logs:
-        await update.message.reply_text("📭 No attendance records found.")
-        return
-
-    # ===== Generate PDF =====
+def generate_pdf(name, emp_id, start_date, end_date, logs):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    # Title
+    elements.append(Paragraph("Attendance Report", styles['Title']))
+    elements.append(Paragraph(f"{name} ({emp_id})", styles['Heading2']))
+    elements.append(Paragraph(f"Period: {start_date} to {end_date}", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
+
+    # Table
     data = [["#", "Date", "Time", "Log Type"]]
-    for i, l in enumerate(user_logs, start=1):
-        timestamp = l["timestamp"]  # Format: "YYYY-MM-DD HH:MM:SS"
-        dt, tm = timestamp.split(" ")
-        data.append([str(i), dt, tm, l["log_type"]])
+    for i, log in enumerate(logs, start=1):
+        dt = log["check_time"].strftime("%Y-%m-%d")
+        tm = log["check_time"].strftime("%I:%M %p")
+        data.append([i, dt, tm, log["log_type"]])
 
-    table = Table(data, colWidths=[50, 100, 100, 100])
-    table.setStyle(
-        TableStyle([('BACKGROUND', (0, 0), (-1, 0),
-                     colors.HexColor("#4a90e2")),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey)]))
-    doc.build([table])
+    table = Table(data, colWidths=[0.6*inch,1.5*inch,1.5*inch,1.2*inch])
+    style = TableStyle([
+        ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#4a90e2")),
+        ('TEXTCOLOR',(0,0),(-1,0),colors.white),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),
+        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
+        ('BOTTOMPADDING',(0,0),(-1,0),10),
+        ('GRID',(0,0),(-1,-1),0.5,colors.grey),
+        ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.lightgrey])
+    ])
+    table.setStyle(style)
+    elements.append(table)
+
+    doc.build(elements)
     buffer.seek(0)
-    await update.message.reply_document(
-        document=buffer, filename=f"{emp_id}_attendance.pdf")
+    return buffer
 
+# ================== TELEGRAM HANDLERS ==================
+def start(update: Update, context: CallbackContext):
+    chat_id = str(update.effective_chat.id)
+    emp = get_employee_by_chat_id(chat_id)
+    if emp:
+        update.message.reply_text(
+            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nExample: /mylog\nThen reply with: 2025-10-01 to 2025-10-04"
+        )
+    else:
+        update.message.reply_text("⚠️ You are not registered. Contact admin.")
 
-# ======= Add Handlers =======
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("register", register))
-application.add_handler(CommandHandler("mylog", mylog))
+def mylog_command(update: Update, context: CallbackContext):
+    chat_id = str(update.effective_chat.id)
+    emp = get_employee_by_chat_id(chat_id)
+    if not emp:
+        update.message.reply_text("⚠️ You are not registered. Contact admin.")
+        return ConversationHandler.END
+    update.message.reply_text("📅 Enter date range (YYYY-MM-DD to YYYY-MM-DD):")
+    return ASK_DATE_RANGE
 
+def handle_date_range(update: Update, context: CallbackContext):
+    user_input = update.message.text.strip()
+    try:
+        start_str, end_str = user_input.split("to")
+        start_date = start_str.strip()
+        end_date = end_str.strip()
+        datetime.strptime(start_date, "%Y-%m-%d")
+        datetime.strptime(end_date, "%Y-%m-%d")
 
-# ======= Run Flask in Thread, Telegram Bot in Main =======
-def run_flask():
-    app.run(host="0.0.0.0", port=3000, debug=False, use_reloader=False)
+        chat_id = str(update.effective_chat.id)
+        emp = get_employee_by_chat_id(chat_id)
+        if not emp:
+            update.message.reply_text("⚠️ Not registered.")
+            return ConversationHandler.END
 
+        logs = fetch_logs(emp["emp_id"], start_date, end_date)
+        if not logs:
+            update.message.reply_text("📭 No attendance records found.")
+            return ConversationHandler.END
 
+        pdf_buffer = generate_pdf(emp["name"], emp["emp_id"], start_date, end_date, logs)
+        update.message.reply_document(InputFile(pdf_buffer, filename=f"{emp['emp_id']}_attendance.pdf"))
+
+    except Exception as e:
+        update.message.reply_text("⚠️ Invalid format. Use: YYYY-MM-DD to YYYY-MM-DD")
+        print("Date parsing error:", e)
+
+    return ConversationHandler.END
+
+# ================== MAIN FUNCTION ==================
+def main():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("mylog", mylog_command)],
+        states={ASK_DATE_RANGE: [MessageHandler(Filters.text & ~Filters.command, handle_date_range)]},
+        fallbacks=[]
+    )
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(conv_handler)
+
+    print("✅ Bot running...")
+    updater.start_polling()
+    updater.idle()
+
+# ================== RUN BOT + FLASK ==================
 if __name__ == "__main__":
-    # Start Flask in a background thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Run Telegram bot in main thread
-    print("✓ Starting Telegram bot polling...")
-    application.run_polling()
+    import threading
+    # Run Flask in a separate thread
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))).start()
+    # Run Telegram bot
+    main()
