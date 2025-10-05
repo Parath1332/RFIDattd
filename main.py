@@ -3,30 +3,27 @@ import os
 import json
 from io import BytesIO
 from datetime import datetime
-from flask import Flask
+from flask import Flask, request, Response
 import gspread
 from google.oauth2.service_account import Credentials
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
-from telegram import Update, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler, ContextTypes, filters
+from telegram import Update, InputFile, Bot
+from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, ContextTypes, filters
 
 # ================== FLASK SETUP ==================
 flask_app = Flask(__name__)
 
-@flask_app.route("/")
-def home():
-    return "RFID Telegram Bot is running!"
-
 # ================== CONFIG ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_SHEETS_KEY = json.loads(os.environ.get("GOOGLE_SHEETS_KEY"))
+TELEGRAM_WEBHOOK_PATH = "/webhook"
 
 ASK_DATE_RANGE = 1
 
-# ================== GOOGLE SHEETS SETUP ==================
+# ================== GOOGLE SHEETS ==================
 scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_info(GOOGLE_SHEETS_KEY, scopes=scope)
 client = gspread.authorize(creds)
@@ -98,7 +95,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emp = get_employee_by_chat_id(chat_id)
     if emp:
         await update.message.reply_text(
-            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nExample: /mylog\nThen reply with: YYYY-MM-DD to YYYY-MM-DD"
+            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nThen reply with: YYYY-MM-DD to YYYY-MM-DD"
         )
     else:
         await update.message.reply_text("⚠️ You are not registered. Contact admin.")
@@ -141,26 +138,31 @@ async def handle_date_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
-# ================== RUN TELEGRAM BOT ==================
-def run_telegram_bot():
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+# ================== TELEGRAM WEBHOOK ==================
+flask_bot = Bot(token=BOT_TOKEN)
+application = Application.builder().bot(flask_bot).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("mylog", mylog_command)],
-        states={ASK_DATE_RANGE: [MessageHandler(filters.TEXT & (~filters.COMMAND), handle_date_range)]},
-        fallbacks=[]
-    )
+conv_handler = ConversationHandler(
+    entry_points=[CommandHandler("mylog", mylog_command)],
+    states={ASK_DATE_RANGE: [MessageHandler(filters.TEXT & (~filters.COMMAND), handle_date_range)]},
+    fallbacks=[]
+)
 
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(conv_handler)
+application.add_handler(CommandHandler("start", start))
+application.add_handler(conv_handler)
 
-    print("✅ Telegram Bot running...")
-    app_bot.run_polling()
+@flask_app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
+def telegram_webhook():
+    update = Update.de_json(request.get_json(force=True), flask_bot)
+    application.update_queue.put(update)
+    return Response(status=200)
 
-# ================== MAIN ==================
+# ================== RUN FLASK ==================
 if __name__ == "__main__":
-    import threading
-    # Run Flask in a separate thread
-    threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))), daemon=True).start()
-    # Run Telegram bot
-    run_telegram_bot()
+    # Set webhook URL here or via Render env variable
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    if webhook_url:
+        flask_bot.set_webhook(url=webhook_url + TELEGRAM_WEBHOOK_PATH)
+        print(f"Webhook set: {webhook_url + TELEGRAM_WEBHOOK_PATH}")
+
+    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
