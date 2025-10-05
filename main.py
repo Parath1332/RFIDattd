@@ -1,12 +1,10 @@
-# main.py
 import os
 import json
 from io import BytesIO
 from datetime import datetime
 from flask import Flask
-
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
@@ -25,15 +23,13 @@ def home():
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_SHEETS_KEY = json.loads(os.environ.get("GOOGLE_SHEETS_KEY"))
 
-# Telegram bot state
 ASK_DATE_RANGE = 1
 
 # ================== GOOGLE SHEETS SETUP ==================
-scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_SHEETS_KEY, scope)
+SCOPE = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_info(GOOGLE_SHEETS_KEY, scopes=SCOPE)
 client = gspread.authorize(creds)
 
-# Change these to your actual spreadsheet and worksheet names
 SHEET_NAME = "AttendanceDB"
 EMPLOYEE_WS = "Employees"
 ATTENDANCE_WS = "Attendance"
@@ -67,26 +63,24 @@ def generate_pdf(name, emp_id, start_date, end_date, logs):
     styles = getSampleStyleSheet()
     elements = []
 
-    # Title
     elements.append(Paragraph("Attendance Report", styles['Title']))
     elements.append(Paragraph(f"{name} ({emp_id})", styles['Heading2']))
     elements.append(Paragraph(f"Period: {start_date} to {end_date}", styles['Normal']))
-    elements.append(Spacer(1, 0.2*inch))
+    elements.append(Spacer(1, 12))
 
-    # Table
     data = [["#", "Date", "Time", "Log Type"]]
     for i, log in enumerate(logs, start=1):
         dt = log["check_time"].strftime("%Y-%m-%d")
         tm = log["check_time"].strftime("%I:%M %p")
         data.append([i, dt, tm, log["log_type"]])
 
-    table = Table(data, colWidths=[0.6*inch,1.5*inch,1.5*inch,1.2*inch])
+    table = Table(data, colWidths=[40,100,100,80])
     style = TableStyle([
         ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#4a90e2")),
         ('TEXTCOLOR',(0,0),(-1,0),colors.white),
         ('ALIGN',(0,0),(-1,-1),'CENTER'),
         ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-        ('BOTTOMPADDING',(0,0),(-1,0),10),
+        ('BOTTOMPADDING',(0,0),(-1,0),8),
         ('GRID',(0,0),(-1,-1),0.5,colors.grey),
         ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.lightgrey])
     ])
@@ -103,7 +97,7 @@ def start(update: Update, context: CallbackContext):
     emp = get_employee_by_chat_id(chat_id)
     if emp:
         update.message.reply_text(
-            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report.\nExample: /mylog\nThen reply with: 2025-10-01 to 2025-10-04"
+            f"👋 Hi {emp['name']}!\nUse /mylog to get your attendance report."
         )
     else:
         update.message.reply_text("⚠️ You are not registered. Contact admin.")
@@ -118,9 +112,8 @@ def mylog_command(update: Update, context: CallbackContext):
     return ASK_DATE_RANGE
 
 def handle_date_range(update: Update, context: CallbackContext):
-    user_input = update.message.text.strip()
     try:
-        start_str, end_str = user_input.split("to")
+        start_str, end_str = update.message.text.strip().split("to")
         start_date = start_str.strip()
         end_date = end_str.strip()
         datetime.strptime(start_date, "%Y-%m-%d")
@@ -128,10 +121,6 @@ def handle_date_range(update: Update, context: CallbackContext):
 
         chat_id = str(update.effective_chat.id)
         emp = get_employee_by_chat_id(chat_id)
-        if not emp:
-            update.message.reply_text("⚠️ Not registered.")
-            return ConversationHandler.END
-
         logs = fetch_logs(emp["emp_id"], start_date, end_date)
         if not logs:
             update.message.reply_text("📭 No attendance records found.")
@@ -140,13 +129,11 @@ def handle_date_range(update: Update, context: CallbackContext):
         pdf_buffer = generate_pdf(emp["name"], emp["emp_id"], start_date, end_date, logs)
         update.message.reply_document(InputFile(pdf_buffer, filename=f"{emp['emp_id']}_attendance.pdf"))
 
-    except Exception as e:
+    except Exception:
         update.message.reply_text("⚠️ Invalid format. Use: YYYY-MM-DD to YYYY-MM-DD")
-        print("Date parsing error:", e)
-
     return ConversationHandler.END
 
-# ================== MAIN FUNCTION ==================
+# ================== MAIN ==================
 def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
@@ -164,10 +151,9 @@ def main():
     updater.start_polling()
     updater.idle()
 
-# ================== RUN BOT + FLASK ==================
 if __name__ == "__main__":
     import threading
-    # Run Flask in a separate thread
+    # Flask thread
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))).start()
-    # Run Telegram bot
+    # Telegram bot
     main()
