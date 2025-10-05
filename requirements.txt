@@ -1,6 +1,5 @@
-flask
-gspread
-oauth2client
+Flask==2.3.4
 python-telegram-bot==13.15
-reportlab
-
+gspread==5.7.2
+oauth2client==4.1.3
+reportlab==3.7.0
